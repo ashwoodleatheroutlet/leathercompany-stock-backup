@@ -39,11 +39,6 @@ query StockSnapshot($cursor: String) {
   }
 }
 """
-COLS = (
-    "snapshot_date", "product_title", "variant_title", "sku", "barcode",
-    "product_status", "inventory_tracked", "available_quantity", "variant_id"
-)
-
 
 def setting(name):
     value = os.environ.get(name, "").strip()
@@ -151,11 +146,13 @@ def fetch_variants(token):
 
 
 def csv_attachment(rows):
+    # Keep only the two requested columns in the emailed file.
+    # Preserve SKU as text, including leading zeros. Do not aggregate variants.
     output = io.StringIO(newline="")
-    writer = csv.DictWriter(output, fieldnames=COLS, lineterminator="\r\n")
-    writer.writeheader()
-    writer.writerows(rows)
-    # UTF-8 BOM so Excel opens non-English characters correctly.
+    writer = csv.writer(output, lineterminator="\r\n")
+    writer.writerow(("SKU", "Stock"))
+    writer.writerows((row["sku"], row["available_quantity"]) for row in rows)
+    # UTF-8 BOM helps Excel open the CSV consistently.
     csv_bytes = ("\ufeff" + output.getvalue()).encode("utf-8")
     if len(csv_bytes) > 20 * 1024 * 1024:
         raise RuntimeError("CSV is larger than 20MB; email not sent.")
