@@ -1,0 +1,49 @@
+Leather Company 11:45 PM UK end-of-day Shopify stock backup
+============================================================
+
+Replace these two files in the existing PRIVATE GitHub repository:
+  stock_backup.py
+  .github/workflows/daily-stock.yml
+
+What changed:
+  - GitHub cron was REMOVED. Make is the only nightly scheduler.
+  - GitHub workflow_dispatch accepts an optional snapshot_date (YYYY-MM-DD).
+  - The Python script uses that date to name the CSV, even if GitHub is delayed
+    slightly past midnight. It logs the actual capture start time and includes
+    that actual time in the email body.
+  - Manual GitHub runs with blank snapshot_date use the actual UK date.
+  - CSV still has exactly two columns: SKU, Stock.
+  - Existing SHOPIFY_CLIENT_ID, SHOPIFY_CLIENT_SECRET, MAIL_FROM,
+    MAIL_APP_PASSWORD, and MAIL_TO secrets stay unchanged.
+
+Create a SECOND Make.com scenario (leave the existing email -> Google Drive
+scenario active):
+  1. In Make Profile -> Time zone options, set the ORGANIZATION time zone to
+     Europe/London (not just your personal display time zone).
+  2. Add HTTP -> Make a request, with:
+       Method: POST
+       URL: https://api.github.com/repos/ashwoodleatheroutlet/leathercompany-stock-backup/actions/workflows/daily-stock.yml/dispatches
+       Headers: Accept: application/vnd.github+json
+                X-GitHub-Api-Version: 2022-11-28
+                Content-Type: application/json
+       Authentication: API key, in header Authorization;
+             Key: Bearer <fine-grained GitHub PAT>
+             Allowed service origin: https://api.github.com
+       Body type: Raw / application/json
+       Body: {"ref":"main","inputs":{"snapshot_date":"<Make formatDate(now; YYYY-MM-DD; Europe/London)>"}}
+     Use Make's mapped date function instead of the literal placeholder. In
+     the JSON editor, enter the function as an expression within the quotes.
+  3. Configure scenario schedule -> Daily -> 23:45 (Europe/London).
+  4. Save and activate the SECOND Make scenario.
+  5. Test it; GitHub should show a workflow_dispatch run and mail the CSV.
+
+Create a fine-grained PAT in GitHub Settings -> Developer settings ->
+Personal access tokens -> Fine-grained tokens, limited to this private repo,
+with Repository permissions -> Actions -> Read and write. The account must
+have permission to dispatch workflows in the repository. Store the token in
+Make's HTTP authentication connection; NEVER hardcode it in the scenario body,
+repository or screenshot.
+
+Note: Make schedules are not hard real-time; GitHub dispatch jobs may queue.
+The email body records the actual UK capture time. If it differs from the
+labelled trading date, it will also be flagged in the job logs.

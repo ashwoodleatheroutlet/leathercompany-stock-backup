@@ -16,7 +16,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime
+from datetime import date, datetime
 from email.message import EmailMessage
 from zoneinfo import ZoneInfo
 
@@ -99,11 +99,10 @@ def get_token():
     return result["access_token"]
 
 
-def fetch_variants(token):
+def fetch_variants(token, snapshot_date):
     url = f"https://{SHOP}/admin/api/{API_VERSION}/graphql.json"
     cursor = None
     rows = []
-    snapshot_date = datetime.now(ZoneInfo("Europe/London")).date().isoformat()
     for page_number in range(2000):
         result = post_json_or_form(
             url, {"query": QUERY, "variables": {"cursor": cursor}},
@@ -159,7 +158,7 @@ def csv_attachment(rows):
     return csv_bytes
 
 
-def email_backup(snapshot_date, rows, attachment):
+def email_backup(snapshot_date, rows, attachment, capture_started_at):
     email_from = setting("MAIL_FROM")
     email_to = setting("MAIL_TO")
     app_password = setting("MAIL_APP_PASSWORD")
@@ -172,6 +171,7 @@ def email_backup(snapshot_date, rows, attachment):
         f"Attached is the Leather Company stock snapshot for {snapshot_date}.\n\n"
         f"Variants: {len(rows)}\n"
         f"Quantity: Shopify available stock across all locations.\n"
+        f"Actual capture started (UK): {capture_started_at.isoformat(timespec='seconds')}\n"
         f"File: {filename}\n\n"
         "This is an automated inventory export."
     )
@@ -183,10 +183,28 @@ def email_backup(snapshot_date, rows, attachment):
 
 
 def main():
+    # Make supplies the UK trading date at 23:45. This protects the filename
+    # if GitHub starts a little after midnight. Manual runs default to today.
+    snapshot_date = os.environ.get("SNAPSHOT_DATE", "").strip()
+    if snapshot_date:
+        try:
+            if date.fromisoformat(snapshot_date).isoformat() != snapshot_date:
+                raise ValueError("Invalid date format")
+        except ValueError:
+            raise RuntimeError("SNAPSHOT_DATE must be YYYY-MM-DD") from None
+
     token = get_token()
-    snapshot_date, rows = fetch_variants(token)
+    capture_started_at = datetime.now(ZoneInfo("Europe/London"))
+    if not snapshot_date:
+        snapshot_date = capture_started_at.date().isoformat()
+    print(f"UK capture started: {capture_started_at.isoformat(timespec='seconds')}")
+    print(f"Trading date/filename label: {snapshot_date}")
+    if snapshot_date != capture_started_at.date().isoformat():
+        print("WARNING: Capture is taking place on a different UK date than "
+              "the requested trading date. Review for forecasting accuracy.")
+    snapshot_date, rows = fetch_variants(token, snapshot_date)
     csv_bytes = csv_attachment(rows)
-    email_backup(snapshot_date, rows, csv_bytes)
+    email_backup(snapshot_date, rows, csv_bytes, capture_started_at)
 
 
 if __name__ == "__main__":

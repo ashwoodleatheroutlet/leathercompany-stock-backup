@@ -1,10 +1,14 @@
 name: Leather Company daily stock CSV email
 
+# Make.com triggers this at 23:45 Europe/London every day.
+# Do not add a cron schedule here, otherwise two backups may run.
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '30 23 * * *'
-      timezone: 'Europe/London'
+    inputs:
+      snapshot_date:
+        description: 'End-of-day trading date (YYYY-MM-DD, UK time). Leave blank for manual runs.'
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -31,4 +35,5 @@ jobs:
           MAIL_FROM: ${{ secrets.MAIL_FROM }}
           MAIL_APP_PASSWORD: ${{ secrets.MAIL_APP_PASSWORD }}
           MAIL_TO: ${{ secrets.MAIL_TO }}
+          SNAPSHOT_DATE: ${{ inputs.snapshot_date }}
         run: python stock_backup.py
