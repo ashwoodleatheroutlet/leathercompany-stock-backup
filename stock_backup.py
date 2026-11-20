@@ -134,6 +134,8 @@ def fetch_variants(token, snapshot_date):
                                        else variant["inventoryQuantity"]),
                 "variant_id": variant.get("id") or "",
             })
+        if (page_number + 1) % 50 == 0:
+            print(f"Shopify inventory: fetched {len(rows)} variants so far", flush=True)
         if not page_info.get("hasNextPage"):
             if not rows:
                 raise RuntimeError("Shopify returned no product variants. Email cancelled.")
@@ -161,7 +163,7 @@ def csv_attachment(rows):
 def email_backup(snapshot_date, rows, attachment, capture_started_at):
     email_from = setting("MAIL_FROM")
     email_to = setting("MAIL_TO")
-    app_password = setting("MAIL_APP_PASSWORD")
+    app_password = setting("MAIL_APP_PASSWORD").replace(" ", "")
     filename = f"LeatherCompany_Stock_{snapshot_date}.csv"
     msg = EmailMessage()
     msg["From"] = email_from
@@ -176,10 +178,72 @@ def email_backup(snapshot_date, rows, attachment, capture_started_at):
         "This is an automated inventory export."
     )
     msg.add_attachment(attachment, maintype="text", subtype="csv", filename=filename)
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=45, context=ssl.create_default_context()) as server:
-        server.login(email_from, app_password.replace(" ", ""))
-        server.send_message(msg)
-    print(f"Sent {filename} to {email_to}: {len(rows)} variants.")
+
+    # Gmail supports SMTP_SSL (465) and STARTTLS (587). Retry only if the
+    # connection fails before sending, to avoid duplicate deliveries.
+    connection_options = ((465, "SSL"), (465, "SSL"), (587, "STARTTLS"), (587, "STARTTLS"))
+    for attempt, (port, mode) in enumerate(connection_options, start=1):
+        server = None
+        stage = "connecting"
+        print(f"Gmail SMTP: attempt {attempt}/4, {mode} port {port}", flush=True)
+        try:
+            if port == 465:
+                server = smtplib.SMTP_SSL(
+                    "smtp.gmail.com", 465, timeout=30,
+                    context=ssl.create_default_context()
+                )
+            else:
+                server = smtplib.SMTP("smtp.gmail.com", 587, timeout=30)
+                server.ehlo()
+                server.starttls(context=ssl.create_default_context())
+                server.ehlo()
+
+            stage = "authenticating"
+            server.login(email_from, app_password)
+            stage = "sending"
+            print(f"Gmail SMTP: authenticated; sending {filename}", flush=True)
+            refused = server.send_message(msg)
+            if refused:
+                # Do not retry: some recipients may have already received it.
+                raise RuntimeError(
+                    f"Gmail rejected {len(refused)} recipient(s). Check MAIL_TO."
+                )
+            print(f"Email accepted by Gmail: {filename}; {len(rows)} variants", flush=True)
+            return
+        except smtplib.SMTPAuthenticationError as exc:
+            raise RuntimeError(
+                f"Gmail authentication rejected (SMTP {exc.smtp_code}). "
+                "Check MAIL_FROM and MAIL_APP_PASSWORD in GitHub Secrets."
+            ) from None
+        except (smtplib.SMTPServerDisconnected, smtplib.SMTPConnectError,
+                TimeoutError, OSError) as exc:
+            if stage == "sending":
+                # The server might have accepted the email before dropping.
+                # A retry might deliver duplicate attachments.
+                raise RuntimeError(
+                    f"Gmail SMTP connection dropped while sending ({type(exc).__name__}). "
+                    "Delivery is uncertain; check Gmail Sent and the Make mailhook "
+                    "before manually rerunning."
+                ) from None
+            print(
+                f"Gmail SMTP: connection failed during {stage} ({type(exc).__name__}); "
+                "trying another connection if available.", flush=True
+            )
+            if attempt == len(connection_options):
+                raise RuntimeError(
+                    "Gmail SMTP couldn't connect or authenticate reliably "
+                    "on ports 465 or 587 after 4 attempts."
+                ) from None
+            time.sleep(min(attempt * 3, 9))
+        finally:
+            if server is not None:
+                # Closing a successful SMTP transaction can itself raise
+                # SMTPServerDisconnected if the server closed before QUIT.
+                # That should not cause a false job failure after send_message.
+                try:
+                    server.quit()
+                except (smtplib.SMTPException, OSError):
+                    server.close()
 
 
 def main():
@@ -193,7 +257,9 @@ def main():
         except ValueError:
             raise RuntimeError("SNAPSHOT_DATE must be YYYY-MM-DD") from None
 
+    print("Connecting to Shopify...", flush=True)
     token = get_token()
+    print("Shopify token obtained.", flush=True)
     capture_started_at = datetime.now(ZoneInfo("Europe/London"))
     if not snapshot_date:
         snapshot_date = capture_started_at.date().isoformat()
@@ -203,7 +269,9 @@ def main():
         print("WARNING: Capture is taking place on a different UK date than "
               "the requested trading date. Review for forecasting accuracy.")
     snapshot_date, rows = fetch_variants(token, snapshot_date)
+    print(f"Shopify export complete: {len(rows)} variants.", flush=True)
     csv_bytes = csv_attachment(rows)
+    print(f"CSV generated: {len(csv_bytes)} bytes, SKU and Stock only.", flush=True)
     email_backup(snapshot_date, rows, csv_bytes, capture_started_at)
 
 
@@ -211,5 +279,5 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as error:
-        print(f"ERROR: {error}", file=sys.stderr)
+        print(f"ERROR: {type(error).__name__}: {error}", file=sys.stderr, flush=True)
         sys.exit(1)
